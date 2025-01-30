@@ -86,7 +86,7 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 
 func analyzeMessage(ctx context.Context, message string) (analysisResult, error) {
 	ollamaReq := ollamaGenerateRequest{
-		Model:  "llama3.2:1b",
+		Model:  modelName,
 		Prompt: generatePrompt(message),
 		Stream: false,
 		Format: map[string]interface{}{
@@ -214,7 +214,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8086"
+		port = "8080"
 	}
 	addr := ":" + port
 
