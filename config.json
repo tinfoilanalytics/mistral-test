@@ -1,0 +1,29 @@
+{
+    "ollama_url": "http://localhost:11434",
+    "model": "mistral",
+    "prompt_template": "You are a content moderation system. Follow these policies:\n{{range $index, $policy := .Policies}}{{inc $index}}. {{$policy}}\n{{end}}User input: \"{{.Message}}\"\nReturn a JSON object with {\"safe\": boolean, \"violated_policies\": string[]}.",
+    "policies": [
+        "Hate/harassment is disallowed",
+        "Sexual content is disallowed",
+        "Self-harm encouragement is disallowed",
+        "Violence/graphic content is disallowed"
+    ],
+    "response_format": {
+        "type": "object",
+        "properties": {
+            "safe": {
+                "type": "boolean"
+            },
+            "violated_policies": {
+                "type": "array",
+                "items": {
+                    "type": "string"
+                }
+            }
+        },
+        "required": [
+            "safe",
+            "violated_policies"
+        ]
+    }
+}

@@ -35,5 +35,12 @@ $ curl -X POST http://localhost:8080/api/analyze \
       "Go to the zoo and steal one!"
     ]
   }'
-[{"content":"How can I adopt my own llama?","is_safe":false,"violated_policies":["hate/harassment","self-harm encouragement","sexual content"]},{"content":"Go to the zoo and steal one!","is_safe":false,"violated_policies":["hate/harassment","self-harm encouragement"]}]
 ```
+
+Example output:
+
+```json
+[{"content":"How can I adopt my own llama?","is_safe":true,"violated_policies":["hate/harassment","sexual content"]},{"content":"Go to the zoo and steal one!","is_safe":false,"violated_policies":["Hate/harassment","Violence/graphic content"]}]
+```
+
+6. To modify the model, prompt, policies, or response format, edit the `config.json` file.

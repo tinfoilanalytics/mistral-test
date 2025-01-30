@@ -8,14 +8,17 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"os"
+	"text/template"
 )
 
-const (
-	modelName = "mistral"
-	ollamaURL = "http://localhost:11434"
-)
+type Config struct {
+	OllamaURL      string      `json:"ollama_url"`
+	Model          string      `json:"model"`
+	PromptTemplate string      `json:"prompt_template"`
+	Policies       []string    `json:"policies"`
+	ResponseFormat interface{} `json:"response_format"`
+}
 
 type analyzeRequest struct {
 	Messages []string `json:"messages"`
@@ -39,107 +42,104 @@ type moderationResult struct {
 	ViolatedPolicies []string `json:"violated_policies"`
 }
 
-func generatePrompt(message string) string {
-	return fmt.Sprintf(`You are a content moderation system. Follow these policies:
-1. Hate/harassment is disallowed.
-2. Sexual content is disallowed.
-3. Self-harm encouragement is disallowed.
-4. Violence/graphic content is disallowed.
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("error reading config file: %w", err)
+	}
 
-User input: "%s"
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("error parsing config file: %w", err)
+	}
 
-Return a JSON object with {"safe": boolean, "violated_policies": string[]}.`, message)
+	if cfg.OllamaURL == "" || cfg.Model == "" || cfg.PromptTemplate == "" {
+		return nil, fmt.Errorf("missing required fields in config")
+	}
+
+	return &cfg, nil
 }
 
-func handleAnalyze(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+func generatePrompt(message string, policies []string, promptTemplate string) (string, error) {
+	tmpl, err := template.New("prompt").Funcs(template.FuncMap{
+		"inc": func(i int) int { return i + 1 },
+	}).Parse(promptTemplate)
+	if err != nil {
+		return "", fmt.Errorf("error parsing prompt template: %w", err)
 	}
 
-	var req analyzeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+	data := struct {
+		Message  string
+		Policies []string
+	}{
+		Message:  message,
+		Policies: policies,
 	}
 
-	if len(req.Messages) == 0 {
-		http.Error(w, "Messages array cannot be empty", http.StatusBadRequest)
-		return
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("error executing template: %w", err)
 	}
 
-	results := make([]analysisResult, 0, len(req.Messages))
-	for _, message := range req.Messages {
-		result, err := analyzeMessage(r.Context(), message)
-		if err != nil {
-			log.Printf("Error analyzing message '%s': %v", message, err)
-			continue
+	return buf.String(), nil
+}
+
+func handleAnalyze(cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
-		results = append(results, result)
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(results); err != nil {
-		log.Printf("Error encoding response: %v", err)
+		var req analyzeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Messages) == 0 {
+			http.Error(w, "Messages array cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		results := make([]analysisResult, 0, len(req.Messages))
+		for _, message := range req.Messages {
+			result, err := analyzeMessage(r.Context(), message, cfg)
+			if err != nil {
+				log.Printf("Error analyzing message '%s': %v", message, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(results); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
 	}
 }
 
-func analyzeMessage(ctx context.Context, message string) (analysisResult, error) {
+func analyzeMessage(ctx context.Context, message string, cfg *Config) (analysisResult, error) {
+	prompt, err := generatePrompt(message, cfg.Policies, cfg.PromptTemplate)
+	if err != nil {
+		return analysisResult{}, fmt.Errorf("error generating prompt: %w", err)
+	}
+
 	ollamaReq := ollamaGenerateRequest{
-		Model:  modelName,
-		Prompt: generatePrompt(message),
+		Model:  cfg.Model,
+		Prompt: prompt,
 		Stream: false,
-		Format: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"safe": map[string]string{"type": "boolean"},
-				"violated_policies": map[string]interface{}{
-					"type":  "array",
-					"items": map[string]string{"type": "string"},
-				},
-			},
-			"required": []string{"safe", "violated_policies"},
-		},
+		Format: cfg.ResponseFormat,
 	}
 
-	reqBody, err := json.Marshal(ollamaReq)
-	if err != nil {
-		return analysisResult{}, fmt.Errorf("marshaling request: %v", err)
-	}
-
-	log.Printf("Sending request to Ollama at: %s", ollamaURL)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", ollamaURL+"/api/generate", bytes.NewReader(reqBody))
-	if err != nil {
-		return analysisResult{}, fmt.Errorf("creating request: %v", err)
-	}
+	reqBody, _ := json.Marshal(ollamaReq)
+	url := fmt.Sprintf("%s/api/generate", cfg.OllamaURL)
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Debug: Print the full request
-	reqDump, err := httputil.DumpRequestOut(req, true)
-	if err != nil {
-		log.Printf("Failed to dump request: %v", err)
-	} else {
-		log.Printf("Full request:\n%s", string(reqDump))
-	}
-
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return analysisResult{}, fmt.Errorf("making request: %v", err)
-	}
-
-	// Debug: Print the full response
-	respDump, err := httputil.DumpResponse(resp, true)
-	if err != nil {
-		log.Printf("Failed to dump response: %v", err)
-	} else {
-		log.Printf("Full response:\n%s", string(respDump))
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return analysisResult{}, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, body)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return analysisResult{}, fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -147,12 +147,12 @@ func analyzeMessage(ctx context.Context, message string) (analysisResult, error)
 		Response string `json:"response"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return analysisResult{}, fmt.Errorf("decoding response: %v", err)
+		return analysisResult{}, fmt.Errorf("error decoding response: %w", err)
 	}
 
 	var modResult moderationResult
 	if err := json.Unmarshal([]byte(ollamaResp.Response), &modResult); err != nil {
-		return analysisResult{}, fmt.Errorf("parsing moderation result: %v", err)
+		return analysisResult{}, fmt.Errorf("error parsing moderation result: %w", err)
 	}
 
 	return analysisResult{
@@ -176,41 +176,49 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func handleOllamaHealth(w http.ResponseWriter, r *http.Request) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, ollamaURL+"/api/version", nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("creating version request: %v", err), http.StatusServiceUnavailable)
-		return
-	}
+func handleOllamaHealth(ollamaURL string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		url := fmt.Sprintf("%s/api/version", ollamaURL)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("creating version request: %v", err), http.StatusServiceUnavailable)
+			return
+		}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("connecting to Ollama: %v", err), http.StatusServiceUnavailable)
-		return
-	}
-	defer resp.Body.Close()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("connecting to Ollama: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		http.Error(w, fmt.Sprintf("unexpected version status code %d: %s", resp.StatusCode, body), http.StatusBadGateway)
-		return
-	}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			http.Error(w, fmt.Sprintf("unexpected version status code %d: %s", resp.StatusCode, body), http.StatusBadGateway)
+			return
+		}
 
-	w.Write([]byte("ollama: "))
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("Error copying response: %v", err)
+		w.Write([]byte("ollama: "))
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			log.Printf("Error copying response: %v", err)
+		}
 	}
 }
 
 func main() {
+	cfg, err := loadConfig("config.json")
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Content moderation service is running"))
 	})
 
-	mux.HandleFunc("/api/health", corsMiddleware(handleOllamaHealth))
-	mux.HandleFunc("/api/analyze", corsMiddleware(handleAnalyze))
+	mux.HandleFunc("/api/health", corsMiddleware(handleOllamaHealth(cfg.OllamaURL)))
+	mux.HandleFunc("/api/analyze", corsMiddleware(handleAnalyze(cfg)))
 
 	port := os.Getenv("PORT")
 	if port == "" {
