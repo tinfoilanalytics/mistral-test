@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
 	"os"
 )
 
@@ -101,24 +102,57 @@ func analyzeMessage(ctx context.Context, message string) (analysisResult, error)
 		},
 	}
 
-	reqBody, _ := json.Marshal(ollamaReq)
-	req, _ := http.NewRequestWithContext(ctx, "POST", "http://localhost:11434/api/generate", bytes.NewReader(reqBody))
+	reqBody, err := json.Marshal(ollamaReq)
+	if err != nil {
+		return analysisResult{}, fmt.Errorf("marshaling request: %v", err)
+	}
+
+	log.Printf("Sending request to Ollama at: %s", ollamaURL)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", ollamaURL+"/api/generate", bytes.NewReader(reqBody))
+	if err != nil {
+		return analysisResult{}, fmt.Errorf("creating request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// Debug: Print the full request
+	reqDump, err := httputil.DumpRequestOut(req, true)
+	if err != nil {
+		log.Printf("Failed to dump request: %v", err)
+	} else {
+		log.Printf("Full request:\n%s", string(reqDump))
+	}
+
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return analysisResult{}, fmt.Errorf("API request failed")
+	if err != nil {
+		return analysisResult{}, fmt.Errorf("making request: %v", err)
+	}
+
+	// Debug: Print the full response
+	respDump, err := httputil.DumpResponse(resp, true)
+	if err != nil {
+		log.Printf("Failed to dump response: %v", err)
+	} else {
+		log.Printf("Full response:\n%s", string(respDump))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return analysisResult{}, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, body)
 	}
 	defer resp.Body.Close()
 
 	var ollamaResp struct {
 		Response string `json:"response"`
 	}
-	json.NewDecoder(resp.Body).Decode(&ollamaResp)
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+		return analysisResult{}, fmt.Errorf("decoding response: %v", err)
+	}
 
 	var modResult moderationResult
 	if err := json.Unmarshal([]byte(ollamaResp.Response), &modResult); err != nil {
-		return analysisResult{}, fmt.Errorf("invalid JSON response")
+		return analysisResult{}, fmt.Errorf("parsing moderation result: %v", err)
 	}
 
 	return analysisResult{
@@ -180,7 +214,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8086"
 	}
 	addr := ":" + port
 
